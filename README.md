@@ -1,5 +1,7 @@
 # **ARP:A Configurable Heuristic for the MLCS Problem**
 
+**Authors:** Farhana Akter Tumpa, Rebin Silva Valan Arasu, Rajiv Gupta
+
 This repository provides the official implementation of **ARP**, an efficient heuristic algorithm for the **Multiple Longest Common Subsequence (MLCS)** problem.  
 ARP introduces selection-based search that constructs high-quality MLCS solutions through three key components:
 
