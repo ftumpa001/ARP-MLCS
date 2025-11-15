@@ -9,6 +9,10 @@ ARP introduces selection-based search that constructs high-quality MLCS solution
 ARP provides configurable trade-offs between runtime and solution quality and consistently produces strong MLCS results across multiple benchmark datasets.
 
 ---
+## Environment
+- **Supported Python versions:** 3.9 – 3.13  
+- **Tested on:** Python 3.13.5  
+---
 ## **Datasets**
 
 This repository includes three benchmark datasets commonly used in MLCS research:
