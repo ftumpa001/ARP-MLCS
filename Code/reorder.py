@@ -12,18 +12,13 @@ except ImportError:
     print("Could not import delta_debugging.DD. Check PYTHONPATH.")
     sys.exit(1)
 
-# ==================================================
-# CONFIGURATION
-# ==================================================
 MAX_DEPTH = 2
-BEAM_W = 2000          # <-- will be overwritten by --beam argument
+BEAM_W = 2000          
 TOP_PATHS_FOR_SURVIVAL = 1000
 USE_LCS_UB = True
 random.seed(0)
 
-# ==================================================
-# Utility
-# ==================================================
+
 def is_valid_subsequence(subseq: str, seq: str) -> bool:
     it = iter(seq)
     return all(ch in it for ch in subseq)
@@ -47,9 +42,7 @@ def _build_pos_lists(strings: List[str]):
         pos_all.append(d)
     return pos_all
 
-# ==================================================
-# LCS Upper Bound Tables
-# ==================================================
+
 def build_suffix_lcs_table(a: str, b: str):
     n, m = len(a), len(b)
     L = [[0]*(m+1) for _ in range(n+1)]
@@ -64,9 +57,6 @@ def build_suffix_lcs_table(a: str, b: str):
 def build_all_suffix_lcs_tables(primary: str, others: List[str]):
     return [build_suffix_lcs_table(primary, s) for s in others]
 
-# ==================================================
-# BEAM-GUIDED DELTA ORDERING
-# ==================================================
 def beam_rank_deltas(primary: str, strings: List[str]) -> List[int]:
     pidx = strings.index(primary)
     others = [s for i, s in enumerate(strings) if i != pidx]
@@ -149,9 +139,7 @@ def beam_rank_deltas(primary: str, strings: List[str]) -> List[int]:
     additions.sort(key=lambda i: (-surv.get(i, 0), i))
     return additions
 
-# ==================================================
-# ADDITION-BASED DD CLASS
-# ==================================================
+
 class MLCS_Addition(DD):
     def __init__(self, strings: list[str], primary_string=None):
         super().__init__()
@@ -181,13 +169,13 @@ class MLCS_Addition(DD):
     def __listminus(self, c1, c2):
         return [x for x in c1 if x not in set(c2)]
 
-    # =============== ddmin_add =======================
+   
     def ddmin_add(self, c, r=list(), *, _depth=0):
         set_c = set(c)
         list_c = list(c)
         solns = []
 
-        # outer expansion loop
+        
         while self.test(list(set(c) - set_c) + r) == self.FAIL:
             soln = set(self.vanilla_add_dd(list_c, n=2, r=list(set(c) - set_c) + r))
             soln |= (set(c) - set_c)
@@ -195,7 +183,7 @@ class MLCS_Addition(DD):
             list_c = list(set_c)
             solns.append(soln)
 
-        # recursive refinement
+       
         if _depth < MAX_DEPTH:
             all_soln = set(c).intersection(*solns) if solns else set()
             set_c = set(c) - all_soln
@@ -222,7 +210,7 @@ class MLCS_Addition(DD):
             return []
         return list(max(solns, key=len))
 
-    # ==================================================
+    
     def vanilla_add_dd(self, c, n=2, r=list()):
         cur_soln = []
         cbar_offset = 0
@@ -263,16 +251,12 @@ class MLCS_Addition(DD):
 
             n = next_n
 
-# ==================================================
-# Data Loading
-# ==================================================
+
 def load_sequences_from_file(path: str) -> List[str]:
     with open(path) as f:
         return [line.strip() for line in f if line.strip()]
 
-# ==================================================
-# MLCS Runner
-# ==================================================
+
 def dd_MLCS_addition(sequences: List[str]):
     results = []
     for i, s in enumerate(sequences):
@@ -324,7 +308,7 @@ if __name__ == "__main__":
                         help="Beam width for beam-guided ordering (default=2000)")
     args = parser.parse_args()
 
-    # overwrite beam width
+    
     BEAM_W = args.beam
 
     sequences = load_sequences_from_file(args.input)
