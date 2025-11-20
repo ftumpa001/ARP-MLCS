@@ -43,21 +43,23 @@ python3 Code/Addition.py --input path/to/dataset/file.txt
 ### **Replacement Algorithm ARP(0)**  
 Runs the complete ARP(0) as described in the paper.
 ```bash
-python3 Code/ARP.py --input path/to/dataset/file.txt
+python3 Code/ARP.py --input path/to/dataset/file.txt --maxdepth <VALUE>
+
 ```
 ### **ARP Algorithm ARP(2000)**  
 This mode runs the full ARP heuristic using a beam-guided search.
 This is the strongest configuration used in the paper and typically yields the best MLCS quality.
 ```bash
-python3 Code/reorder.py --input path/to/dataset/file.txt
+python3 Code/reorder.py --input path/to/dataset/file.txt --beam <BEAM_WIDTH>
 ```
-Runs the complete ARP heuristic as described in the paper.
+Runs the complete ARP heuristic as described in the paper. The dataset is structured so that Sequence 1 is the best primary (highest MLCS), so the script outputs results only for Primary 1.
+
 
 ### **Primary Sequence Ranking**
 
 Predicts which sequences are most likely to be best primaries and runs ARP only on the top-k.
 ```bash
-python3 Code/primary_ranking.py --input path/to/dataset/file.txt
+python3 Code/primary_sequnced_rank_ARP.py --input path/to/dataset/file.txt
 ```
 This significantly reduces runtime while still producing best solution quality.
 
