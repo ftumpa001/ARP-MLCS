@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 import os, sys, time, random, resource
 from collections import defaultdict, Counter
@@ -15,11 +16,14 @@ except ImportError:
 # CONFIGURATION
 # ==================================================
 MAX_DEPTH = 2
-BEAM_W = 2000
+BEAM_W = 2000          # <-- will be overwritten by --beam argument
 TOP_PATHS_FOR_SURVIVAL = 1000
 USE_LCS_UB = True
 random.seed(0)
 
+# ==================================================
+# Utility
+# ==================================================
 def is_valid_subsequence(subseq: str, seq: str) -> bool:
     it = iter(seq)
     return all(ch in it for ch in subseq)
@@ -43,17 +47,26 @@ def _build_pos_lists(strings: List[str]):
         pos_all.append(d)
     return pos_all
 
+# ==================================================
+# LCS Upper Bound Tables
+# ==================================================
 def build_suffix_lcs_table(a: str, b: str):
     n, m = len(a), len(b)
     L = [[0]*(m+1) for _ in range(n+1)]
     for i in range(n-1, -1, -1):
         for j in range(m-1, -1, -1):
-            L[i][j] = L[i+1][j+1]+1 if a[i]==b[j] else max(L[i+1][j], L[i][j+1])
+            if a[i] == b[j]:
+                L[i][j] = L[i+1][j+1] + 1
+            else:
+                L[i][j] = max(L[i+1][j], L[i][j+1])
     return L
 
 def build_all_suffix_lcs_tables(primary: str, others: List[str]):
     return [build_suffix_lcs_table(primary, s) for s in others]
 
+# ==================================================
+# BEAM-GUIDED DELTA ORDERING
+# ==================================================
 def beam_rank_deltas(primary: str, strings: List[str]) -> List[int]:
     pidx = strings.index(primary)
     others = [s for i, s in enumerate(strings) if i != pidx]
@@ -66,7 +79,8 @@ def beam_rank_deltas(primary: str, strings: List[str]) -> List[int]:
     n = len(primary)
 
     def ub_remaining(i: int, curs) -> int:
-        if not tables: return 0
+        if not tables:
+            return 0
         vals = []
         for k, T in enumerate(tables):
             j = curs[k] + 1
@@ -86,62 +100,67 @@ def beam_rank_deltas(primary: str, strings: List[str]) -> List[int]:
             best_ln = max(best_ln, ln)
             if i >= n:
                 continue
+
             ch = primary[i]
-            ok, newc = True, []
+
+            # Try including character
+            ok = True
+            newc = []
             for sj, dpos in enumerate(pos_all):
-                np = _next_ge(dpos.get(ch, []), curs[sj]+1)
+                np = _next_ge(dpos.get(ch, []), curs[sj] + 1)
                 if np == -1:
                     ok = False
                     break
                 newc.append(np)
+
             if ok:
                 i2, ln2 = i+1, ln+1
                 curs2 = tuple(newc)
                 f2 = ln2 + ub_remaining(i2, curs2)
-                if f2 >= best_ln - 10 and best_len_at.get((i2,curs2),-1)<ln2:
-                    best_len_at[(i2,curs2)] = ln2
-                    nxt.append((ln2,f2,i2,curs2,picked+[i]))
-            i1 = i+1
+                if f2 >= best_ln - 10 and best_len_at.get((i2, curs2), -1) < ln2:
+                    best_len_at[(i2, curs2)] = ln2
+                    nxt.append((ln2, f2, i2, curs2, picked+[i]))
+
+            # Try skipping character
+            i1 = i + 1
             f1 = ln + ub_remaining(i1, curs)
-            if f1 >= best_ln - 10 and best_len_at.get((i1,curs),-1)<ln:
-                best_len_at[(i1,curs)] = ln
-                nxt.append((ln,f1,i1,curs,picked))
+            if f1 >= best_ln - 10 and best_len_at.get((i1, curs), -1) < ln:
+                best_len_at[(i1, curs)] = ln
+                nxt.append((ln, f1, i1, curs, picked))
+
         if not nxt:
             break
-        nxt.sort(key=lambda s:(-s[1], -s[0], s[2], tuple(s[3]), random.random()))
-        beam = nxt[:BEAM_W]
 
-        for (_, _, _, _, picked) in beam:
-            if picked:
-                seed = tuple(picked[:2]) if len(picked) >= 2 else tuple(picked)
-                beam_seed_counter[seed] += 1
+        nxt.sort(key=lambda s: (-s[1], -s[0], s[2], tuple(s[3]), random.random()))
+        beam = nxt[:BEAM_W]
 
         if all(s[2] >= n for s in beam):
             break
 
-    for (_,_,_,_,picked) in beam[:min(TOP_PATHS_FOR_SURVIVAL,len(beam))]:
+    # Accumulate survival scores
+    for (_, _, _, _, picked) in beam[:min(TOP_PATHS_FOR_SURVIVAL, len(beam))]:
         for i in picked:
-            surv[i]+=1
+            surv[i] += 1
 
     for k in list(surv.keys()):
         surv[k] = int(surv[k] * 5)
 
     additions = list(range(len(primary)))
-    additions.sort(key=lambda i:(-surv.get(i,0), i))
+    additions.sort(key=lambda i: (-surv.get(i, 0), i))
     return additions
 
-
 # ==================================================
-# MLCS ADDITION CLASS
+# ADDITION-BASED DD CLASS
 # ==================================================
 class MLCS_Addition(DD):
     def __init__(self, strings: list[str], primary_string=None):
         super().__init__()
         self.strings = strings
+
         if primary_string is None:
-            self.primary_string = min(self.strings, key=len)
+            self.primary_string = min(strings, key=len)
             charset = set(self.primary_string)
-            for s in self.strings:
+            for s in strings:
                 charset &= set(s)
             self.primary_string = "".join([c for c in self.primary_string if c in charset])
         else:
@@ -152,7 +171,7 @@ class MLCS_Addition(DD):
         return [string[i] for i in sorted(indices)]
 
     def _test(self, additions: list[int]):
-        subseq = ''.join(self.select(self.primary_string, additions))
+        subseq = "".join(self.select(self.primary_string, additions))
         for s in self.strings:
             it = iter(s)
             if not all(ch in it for ch in subseq):
@@ -162,44 +181,62 @@ class MLCS_Addition(DD):
     def __listminus(self, c1, c2):
         return [x for x in c1 if x not in set(c2)]
 
+    # =============== ddmin_add =======================
     def ddmin_add(self, c, r=list(), *, _depth=0):
-        set_c, list_c = set(c), list(c)
+        set_c = set(c)
+        list_c = list(c)
         solns = []
 
-        while self.test(list(set(c)-set_c)+r) == self.FAIL:
-            soln = set(self.vanilla_add_dd(list_c, n=2, r=list(set(c)-set_c)+r))
-            soln |= (set(c)-set_c)
+        # outer expansion loop
+        while self.test(list(set(c) - set_c) + r) == self.FAIL:
+            soln = set(self.vanilla_add_dd(list_c, n=2, r=list(set(c) - set_c) + r))
+            soln |= (set(c) - set_c)
             set_c &= soln
             list_c = list(set_c)
             solns.append(soln)
 
+        # recursive refinement
         if _depth < MAX_DEPTH:
             all_soln = set(c).intersection(*solns) if solns else set()
             set_c = set(c) - all_soln
+
             for soln in solns:
                 assert self.test(list(soln & set_c)+r) == self.FAIL
-                irreplaceable = self.vanilla_add_dd(list(set(c)-soln), n=2, r=list(soln & set_c)+r)
+
+                irreplaceable = self.vanilla_add_dd(
+                    list(set(c) - soln), n=2, r=list(soln & set_c) + r
+                )
+
                 if not irreplaceable:
                     continue
+
                 irreplaceable = list((soln & set_c) | set(irreplaceable))
                 result = self.ddmin_add(all_soln, irreplaceable+r, _depth=_depth+1)
-                if len(result) > len(soln)-len(irreplaceable):
+
+                if len(result) > len(soln) - len(irreplaceable):
                     soln = set(result + irreplaceable)
+
             solns.append(soln)
 
         if not solns:
             return []
         return list(max(solns, key=len))
 
+    # ==================================================
     def vanilla_add_dd(self, c, n=2, r=list()):
         cur_soln = []
         cbar_offset = 0
+
         while True:
-            if n > len(c)-len(cur_soln):
+            if n > len(c) - len(cur_soln):
                 return cur_soln
+
             cs = self.split(self.__listminus(c, cur_soln), n)
-            c_failed = cbar_failed = False
+            c_failed = False
+            cbar_failed = False
             next_n = n
+
+            # try subsets
             for i in range(n):
                 subset = cur_soln + cs[i]
                 if self.test(subset+r) == self.FAIL:
@@ -207,9 +244,10 @@ class MLCS_Addition(DD):
                     cur_soln = subset
                     next_n = 2
                     break
+
             if not c_failed:
                 for j in range(n):
-                    i = int((j + cbar_offset) % n)
+                    i = (j + cbar_offset) % n
                     complement = self.__listminus(c, cs[i])
                     if self.test(complement+r) == self.FAIL:
                         cbar_failed = True
@@ -217,41 +255,57 @@ class MLCS_Addition(DD):
                         next_n -= 1
                         cbar_offset = i
                         break
+
             if not c_failed and not cbar_failed:
-                if n >= len(c)-len(cur_soln):
+                if n >= len(c) - len(cur_soln):
                     return cur_soln
                 next_n = min(len(c)-len(cur_soln), n*2)
+
             n = next_n
 
-
+# ==================================================
+# Data Loading
+# ==================================================
 def load_sequences_from_file(path: str) -> List[str]:
     with open(path) as f:
         return [line.strip() for line in f if line.strip()]
 
+# ==================================================
+# MLCS Runner
+# ==================================================
 def dd_MLCS_addition(sequences: List[str]):
     results = []
     for i, s in enumerate(sequences):
         print(f"\n[Run] Primary {i+1}/{len(sequences)} | len={len(s)}", flush=True)
+
         deltas = beam_rank_deltas(s, sequences)
         dd = MLCS_Addition(sequences, primary_string=s)
         result = dd.ddmin_add(deltas)
-        mlcs = ''.join(MLCS_Addition.select(s, result))
+
+        mlcs = "".join(MLCS_Addition.select(s, result))
         ok = validate_mlcs(mlcs, sequences)
+
         print(f"[Run] Primary {i+1} done | MLCS len={len(mlcs)} | valid={ok}\n")
         results.append((len(mlcs), mlcs))
+
     best = max(results, key=lambda x: x[0])
-    print(f"\n===== Best MLCS Found =====")
+
+    print("\n===== Best MLCS Found =====")
     print(f"Length: {best[0]}")
     print(f"MLCS: {best[1][:100]}{'...' if len(best[1])>100 else ''}")
     return best[1]
 
-# ==================================================
-# MAIN WITH ARGPARSE
-# ==================================================
+"""
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Path to input sequence file")
+    parser.add_argument("--beam", type=int, default=2000,
+                        help="Beam width for beam-guided ordering (default=2000)")
+
     args = parser.parse_args()
+
+    # overwrite config
+    BEAM_W = args.beam
 
     sequences = load_sequences_from_file(args.input)
     print(f" Loaded {len(sequences)} sequences.")
@@ -259,5 +313,41 @@ if __name__ == "__main__":
 
     start = time.time()
     final_mlcs = dd_MLCS_addition(sequences)
+    end = time.time()
+
+    print(f"\n Final Total Runtime: {end - start:.4f} seconds")
+"""
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Path to input sequence file")
+    parser.add_argument("--beam", type=int, default=2000,
+                        help="Beam width for beam-guided ordering (default=2000)")
+    args = parser.parse_args()
+
+    # overwrite beam width
+    BEAM_W = args.beam
+
+    sequences = load_sequences_from_file(args.input)
+    print(f" Loaded {len(sequences)} sequences.")
+    print(f" Lengths: {[len(s) for s in sequences]}")
+
+    start = time.time()
+
+    # ============================================================
+    # *** ONLY RUN FOR PRIMARY SEQUENCE 1 ***
+    # ============================================================
+    primary = sequences[0]                      # primary string #1
+    print(f"\n[Run] Primary 1/1 | len={len(primary)}", flush=True)
+
+    deltas = beam_rank_deltas(primary, sequences)
+    dd = MLCS_Addition(sequences, primary_string=primary)
+    result = dd.ddmin_add(deltas)
+
+    mlcs = "".join(MLCS_Addition.select(primary, result))
+    ok = validate_mlcs(mlcs, sequences)
+
+    print(f"\n[Run] Primary 1 done | MLCS len={len(mlcs)} | valid={ok}")
+    print(f"MLCS: {mlcs[:120]}{'...' if len(mlcs)>120 else ''}")
+
     end = time.time()
     print(f"\n Final Total Runtime: {end - start:.4f} seconds")
