@@ -17,11 +17,13 @@ ARP provides configurable trade-offs between runtime and solution quality and co
 ---
 ## **Datasets**
 
-This repository includes three benchmark datasets commonly used in MLCS research:
+This repository includes five benchmark datasets commonly used in MLCS research:
 
 - **ACO-Random**  
 - **ACO-Virus**  
-- **ACO-Rat**  
+- **ACO-Rat**
+- **BB**
+- **ES**  
 
 Each dataset contains **N sequences of equal length**, with one sequence per line.  
 
