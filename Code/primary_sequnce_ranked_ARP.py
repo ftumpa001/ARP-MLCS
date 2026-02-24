@@ -229,8 +229,12 @@ class MLCS_Addition(DD):
             n=next_n
 
 
+#def load_sequences_from_file(path):
+    #return [line.strip() for line in open(path) if line.strip()]
+
 def load_sequences_from_file(path):
-    return [line.strip() for line in open(path) if line.strip()]
+    with open(path, "r", encoding="latin-1", errors="ignore") as f:
+        return [line.strip() for line in f if line.strip()]
 
 def dd_MLCS_addition(sequences: List[str]):
     ranked, scores = approximate_lcs_primary(sequences)
