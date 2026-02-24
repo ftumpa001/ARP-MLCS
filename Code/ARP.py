@@ -171,7 +171,8 @@ def dd_MLCS_addition(strings: list[str]):
 # ============================================================
 
 def load_sequences_from_file(filepath: str) -> list[str]:
-    with open(filepath, "r") as f:
+    #with open(filepath, "r") as f:
+    with open(filepath, "r", encoding="latin-1") as f:
         return [line.strip() for line in f if line.strip()]
 
 # ============================================================
