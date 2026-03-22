@@ -15,6 +15,11 @@ ARP provides configurable trade-offs between runtime and solution quality and co
 - **Supported Python versions:** 3.9 – 3.13  
 - **Tested on:** Python 3.13.5  
 ---
+
+### Install Dependencies
+```bash
+pip install numpy numba
+```
 ## **Datasets**
 
 This repository includes three benchmark datasets commonly used in MLCS research:
