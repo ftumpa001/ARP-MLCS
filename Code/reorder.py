@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
+
 from __future__ import annotations
-import os, sys, time, random, resource
+import sys, time, random
 from collections import defaultdict, Counter
-from typing import List
-from bisect import bisect_left
+import numpy as np
 import argparse
 
 try:
@@ -13,27 +13,60 @@ except ImportError:
     sys.exit(1)
 
 MAX_DEPTH = 2
-BEAM_W = 2000          
+BEAM_W = 2000
 TOP_PATHS_FOR_SURVIVAL = 1000
-USE_LCS_UB = True
 random.seed(0)
 
+_HAS_NUMBA = False
+try:
+    import numba
+    @numba.njit
+    def _build_lcs_numba(a_arr, b_arr):
+        n = len(a_arr)
+        m = len(b_arr)
+        L = np.zeros((n + 1, m + 1), dtype=np.int32)
+        for i in range(n - 1, -1, -1):
+            ai = a_arr[i]
+            for j in range(m - 1, -1, -1):
+                if ai == b_arr[j]:
+                    L[i, j] = L[i+1, j+1] + 1
+                else:
+                    v1 = L[i+1, j]
+                    v2 = L[i, j+1]
+                    L[i, j] = v1 if v1 > v2 else v2
+        return L
+    _dummy = _build_lcs_numba(np.array([65, 66], dtype=np.int8),
+                               np.array([65, 67], dtype=np.int8))
+    _HAS_NUMBA = True
+    print("[INFO] Numba JIT enabled", flush=True)
+except Exception:
+    print("[WARN] numba not available — suffix LCS will be slow")
 
-def is_valid_subsequence(subseq: str, seq: str) -> bool:
-    it = iter(seq)
-    return all(ch in it for ch in subseq)
+def build_suffix_lcs_table(a, b):
+    if _HAS_NUMBA:
+        a_arr = np.frombuffer(a.encode('latin-1'), dtype=np.int8)
+        b_arr = np.frombuffer(b.encode('latin-1'), dtype=np.int8)
+        return _build_lcs_numba(a_arr, b_arr)
+    else:
+        n, m = len(a), len(b)
+        L = np.zeros((n + 1, m + 1), dtype=np.int32)
+        for i in range(n - 1, -1, -1):
+            ai = a[i]
+            row_next = L[i + 1]
+            row_cur = L[i]
+            for j in range(m - 1, -1, -1):
+                if ai == b[j]:
+                    row_cur[j] = row_next[j + 1] + 1
+                else:
+                    row_cur[j] = max(int(row_next[j]), int(row_cur[j + 1]))
+        return L
 
-def validate_mlcs(candidate: str, sequences: list[str]) -> bool:
-    return all(is_valid_subsequence(candidate, s) for s in sequences)
+def build_all_suffix_lcs_tables(primary, others):
+    return [build_suffix_lcs_table(primary, s) for s in others]
 
-def build_subseq(primary: str, idxs: List[int]) -> str:
-    return "".join(primary[i] for i in sorted(idxs))
 
-def _next_ge(lst, lo):
-    i = bisect_left(lst, lo)
-    return lst[i] if i < len(lst) else -1
 
-def _build_pos_lists(strings: List[str]):
+def _build_pos_lists(strings):
     pos_all = []
     for s in strings:
         d = defaultdict(list)
@@ -43,122 +76,181 @@ def _build_pos_lists(strings: List[str]):
     return pos_all
 
 
-def build_suffix_lcs_table(a: str, b: str):
-    n, m = len(a), len(b)
-    L = [[0]*(m+1) for _ in range(n+1)]
-    for i in range(n-1, -1, -1):
-        for j in range(m-1, -1, -1):
-            if a[i] == b[j]:
-                L[i][j] = L[i+1][j+1] + 1
-            else:
-                L[i][j] = max(L[i+1][j], L[i][j+1])
-    return L
-
-def build_all_suffix_lcs_tables(primary: str, others: List[str]):
-    return [build_suffix_lcs_table(primary, s) for s in others]
-
-def beam_rank_deltas(primary: str, strings: List[str]) -> List[int]:
-    pidx = strings.index(primary)
-    others = [s for i, s in enumerate(strings) if i != pidx]
+def beam_rank_deltas(primary, strings, beam_w=BEAM_W, top_paths=TOP_PATHS_FOR_SURVIVAL, primary_idx=0):
+    others = [s for i, s in enumerate(strings) if i != primary_idx]
     if not others:
         return list(range(len(primary)))
 
-    tables = build_all_suffix_lcs_tables(primary, others) if USE_LCS_UB else None
-    pos_all = _build_pos_lists(others)
-    lens_b = [len(s) for s in others]
+    K = len(others)
     n = len(primary)
+    lens_b = [len(s) for s in others]
 
-    def ub_remaining(i: int, curs) -> int:
-        if not tables:
-            return 0
-        vals = []
-        for k, T in enumerate(tables):
-            j = curs[k] + 1
-            if j <= lens_b[k]:
-                vals.append(T[i][j])
-        return int(sum(vals)/len(vals)*1.2) if vals else 0
+    t0 = time.time()
+    tables = build_all_suffix_lcs_tables(primary, others)
+    t1 = time.time()
+    
+    max_m = max(lens_b)
+    padded_tables = []
+    for t in tables:
+        pad = max_m + 1 - t.shape[1]
+        if pad > 0:
+            t = np.pad(t, ((0, 0), (0, pad)), mode='constant')
+        padded_tables.append(t)
 
-    start_cursors = tuple([-1]*len(others))
-    beam = [(0, ub_remaining(0, start_cursors), 0, start_cursors, [])]
-    best_ln, best_len_at = 0, {}
+    all_tables = np.stack(padded_tables)
+    lens_b_np = np.array(lens_b, dtype=np.int32)
+    k_range = np.arange(K)
+
+    pos_all = _build_pos_lists(others)
+    charset = set(primary)
+    pos_np = {}
+    for ch in charset:
+        pos_np[ch] = [
+            np.array(pos_all[k].get(ch, []), dtype=np.int32)
+            for k in range(K)
+        ]
+
+    def batch_ub(i_next, curs_2d):
+        B_local = curs_2d.shape[0]
+        if i_next > n or B_local == 0:
+            return np.zeros(B_local, dtype=np.int32)
+        j_vals = curs_2d + 1
+        valid = j_vals <= lens_b_np[None, :]
+        j_clip = np.clip(j_vals, 0, max_m)
+        raw = all_tables[k_range[None, :], i_next, j_clip]
+        raw = np.where(valid, raw, 0)
+        counts = valid.sum(axis=1)
+        sums = raw.sum(axis=1, dtype=np.float64)
+        return np.where(counts > 0, (sums / counts * 1.2).astype(np.int32), 0)
+
+    def batch_advance(ch, curs_2d):
+        B_local = curs_2d.shape[0]
+        if ch not in pos_np:
+            return np.zeros(B_local, dtype=bool), None
+        ok = np.ones(B_local, dtype=bool)
+        new_curs = np.empty((B_local, K), dtype=np.int32)
+        for k in range(K):
+            parr = pos_np[ch][k]
+            if len(parr) == 0:
+                ok[:] = False
+                return ok, None
+            targets = curs_2d[:, k] + 1
+            idxs = np.searchsorted(parr, targets)
+            found = idxs < len(parr)
+            ok &= found
+            safe = np.minimum(idxs, len(parr) - 1)
+            new_curs[:, k] = parr[safe]
+        return ok, new_curs
+
+    pool = [(-1, -1)]
+    pool_counter = 1
+
+    B = 1
+    beam_ln = np.zeros(1, dtype=np.int32)
+    beam_curs = np.full((1, K), -1, dtype=np.int32)
+    beam_pool = np.array([0], dtype=np.int32)
+
+    best_ln = 0
+    best_len_at = {}
+
+    for i in range(n):
+        if B == 0:
+            break
+
+        ch = primary[i]
+        i_next = i + 1
+
+        inc_ok, inc_curs_all = batch_advance(ch, beam_curs)
+
+        inc_which = np.where(inc_ok)[0]
+        inc_ub_vals = np.zeros(B, dtype=np.int32)
+        if len(inc_which) > 0:
+            inc_ub_vals[inc_which] = batch_ub(i_next, inc_curs_all[inc_which])
+
+        skip_ub_vals = batch_ub(i_next, beam_curs)
+
+        candidates = []
+        for bi in range(B):
+            best_ln = max(best_ln, int(beam_ln[bi]))
+
+            if inc_ok[bi]:
+                ln_val = int(beam_ln[bi]) + 1
+                f_val = ln_val + int(inc_ub_vals[bi])
+                curs_tup = tuple(inc_curs_all[bi].tolist())
+                key = (i_next, curs_tup)
+                if f_val >= best_ln - 10 and best_len_at.get(key, -1) < ln_val:
+                    best_len_at[key] = ln_val
+                    pool.append((int(beam_pool[bi]), i))
+                    candidates.append((f_val, ln_val, curs_tup, pool_counter))
+                    pool_counter += 1
+
+            ln_val = int(beam_ln[bi])
+            f_val = ln_val + int(skip_ub_vals[bi])
+            curs_tup = tuple(beam_curs[bi].tolist())
+            key = (i_next, curs_tup)
+            if f_val >= best_ln - 10 and best_len_at.get(key, -1) < ln_val:
+                best_len_at[key] = ln_val
+                pool.append((int(beam_pool[bi]), -1))
+                candidates.append((f_val, ln_val, curs_tup, pool_counter))
+                pool_counter += 1
+
+        if not candidates:
+            break
+
+        candidates.sort(key=lambda s: (-s[0], -s[1], s[2], random.random()))
+        candidates = candidates[:beam_w]
+
+        B = len(candidates)
+        beam_ln = np.array([c[1] for c in candidates], dtype=np.int32)
+        beam_curs = np.array([list(c[2]) for c in candidates], dtype=np.int32)
+        beam_pool = np.array([c[3] for c in candidates], dtype=np.int32)
+
     surv = Counter()
-    beam_seed_counter = Counter()
-
-    while beam:
-        nxt = []
-        for (ln, f, i, curs, picked) in beam:
-            best_ln = max(best_ln, ln)
-            if i >= n:
-                continue
-
-            ch = primary[i]
-
-            # Try including character
-            ok = True
-            newc = []
-            for sj, dpos in enumerate(pos_all):
-                np = _next_ge(dpos.get(ch, []), curs[sj] + 1)
-                if np == -1:
-                    ok = False
-                    break
-                newc.append(np)
-
-            if ok:
-                i2, ln2 = i+1, ln+1
-                curs2 = tuple(newc)
-                f2 = ln2 + ub_remaining(i2, curs2)
-                if f2 >= best_ln - 10 and best_len_at.get((i2, curs2), -1) < ln2:
-                    best_len_at[(i2, curs2)] = ln2
-                    nxt.append((ln2, f2, i2, curs2, picked+[i]))
-
-            # Try skipping character
-            i1 = i + 1
-            f1 = ln + ub_remaining(i1, curs)
-            if f1 >= best_ln - 10 and best_len_at.get((i1, curs), -1) < ln:
-                best_len_at[(i1, curs)] = ln
-                nxt.append((ln, f1, i1, curs, picked))
-
-        if not nxt:
-            break
-
-        nxt.sort(key=lambda s: (-s[1], -s[0], s[2], tuple(s[3]), random.random()))
-        beam = nxt[:BEAM_W]
-
-        if all(s[2] >= n for s in beam):
-            break
-
-    # Accumulate survival scores
-    for (_, _, _, _, picked) in beam[:min(TOP_PATHS_FOR_SURVIVAL, len(beam))]:
-        for i in picked:
-            surv[i] += 1
+    n_top = min(top_paths, B)
+    for idx in range(n_top):
+        pid = int(beam_pool[idx])
+        while pid >= 0:
+            parent_pid, added = pool[pid]
+            if added >= 0:
+                surv[added] += 1
+            pid = parent_pid
 
     for k in list(surv.keys()):
         surv[k] = int(surv[k] * 5)
 
-    additions = list(range(len(primary)))
-    additions.sort(key=lambda i: (-surv.get(i, 0), i))
+    additions = list(range(n))
+    additions.sort(key=lambda idx: (-surv.get(idx, 0), idx))
+
+    t2 = time.time()
+   
     return additions
 
+def is_valid_subsequence(subseq, seq):
+    it = iter(seq)
+    return all(ch in it for ch in subseq)
+
+def validate_mlcs(candidate, sequences):
+    return all(is_valid_subsequence(candidate, s) for s in sequences)
 
 class MLCS_Addition(DD):
-    def __init__(self, strings: list[str], primary_string=None):
+    def __init__(self, strings, primary_string=None):
         super().__init__()
         self.strings = strings
-
         if primary_string is None:
             self.primary_string = min(strings, key=len)
             charset = set(self.primary_string)
             for s in strings:
                 charset &= set(s)
-            self.primary_string = "".join([c for c in self.primary_string if c in charset])
+            self.primary_string = "".join(
+                [c for c in self.primary_string if c in charset])
         else:
             self.primary_string = primary_string
 
     @staticmethod
-    def select(string: str, indices: list[int]) -> list[str]:
+    def select(string, indices):
         return [string[i] for i in sorted(indices)]
 
-    def _test(self, additions: list[int]):
+    def _test(self, additions):
         subseq = "".join(self.select(self.primary_string, additions))
         for s in self.strings:
             it = iter(s)
@@ -167,171 +259,106 @@ class MLCS_Addition(DD):
         return self.FAIL
 
     def __listminus(self, c1, c2):
-        return [x for x in c1 if x not in set(c2)]
+        s2 = set(c2)
+        return [x for x in c1 if x not in s2]
 
-   
     def ddmin_add(self, c, r=list(), *, _depth=0):
         set_c = set(c)
         list_c = list(c)
         solns = []
-
-        
         while self.test(list(set(c) - set_c) + r) == self.FAIL:
             soln = set(self.vanilla_add_dd(list_c, n=2, r=list(set(c) - set_c) + r))
             soln |= (set(c) - set_c)
             set_c &= soln
             list_c = list(set_c)
             solns.append(soln)
-
-       
         if _depth < MAX_DEPTH:
             all_soln = set(c).intersection(*solns) if solns else set()
             set_c = set(c) - all_soln
-
             for soln in solns:
-                assert self.test(list(soln & set_c)+r) == self.FAIL
-
+                assert self.test(list(soln & set_c) + r) == self.FAIL
                 irreplaceable = self.vanilla_add_dd(
-                    list(set(c) - soln), n=2, r=list(soln & set_c) + r
-                )
-
+                    list(set(c) - soln), n=2, r=list(soln & set_c) + r)
                 if not irreplaceable:
                     continue
-
                 irreplaceable = list((soln & set_c) | set(irreplaceable))
-                result = self.ddmin_add(all_soln, irreplaceable+r, _depth=_depth+1)
-
+                result = self.ddmin_add(all_soln, irreplaceable + r, _depth=_depth + 1)
                 if len(result) > len(soln) - len(irreplaceable):
                     soln = set(result + irreplaceable)
-
             solns.append(soln)
-
         if not solns:
             return []
         return list(max(solns, key=len))
 
-    
     def vanilla_add_dd(self, c, n=2, r=list()):
         cur_soln = []
         cbar_offset = 0
-
         while True:
             if n > len(c) - len(cur_soln):
                 return cur_soln
-
             cs = self.split(self.__listminus(c, cur_soln), n)
             c_failed = False
             cbar_failed = False
             next_n = n
-
-            # try subsets
             for i in range(n):
                 subset = cur_soln + cs[i]
-                if self.test(subset+r) == self.FAIL:
+                if self.test(subset + r) == self.FAIL:
                     c_failed = True
                     cur_soln = subset
                     next_n = 2
                     break
-
             if not c_failed:
                 for j in range(n):
                     i = (j + cbar_offset) % n
                     complement = self.__listminus(c, cs[i])
-                    if self.test(complement+r) == self.FAIL:
+                    if self.test(complement + r) == self.FAIL:
                         cbar_failed = True
                         cur_soln = complement
                         next_n -= 1
                         cbar_offset = i
                         break
-
             if not c_failed and not cbar_failed:
                 if n >= len(c) - len(cur_soln):
                     return cur_soln
-                next_n = min(len(c)-len(cur_soln), n*2)
-
+                next_n = min(len(c) - len(cur_soln), n * 2)
             n = next_n
 
 
-def load_sequences_from_file(path: str) -> List[str]:
-    with open(path) as f:
+def run_single_primary(primary_idx, sequences, beam_w):
+    primary = sequences[primary_idx]
+    t0 = time.time()
+    charset = set(primary)
+    for s in sequences:
+        charset &= set(s)
+    filtered = "".join(c for c in primary if c in charset)
+    print(f"  [Primary {primary_idx}] len={len(primary)}", flush=True)
+    deltas = beam_rank_deltas(filtered, sequences, beam_w=beam_w, primary_idx=primary_idx)
+    t_dd = time.time()
+    dd = MLCS_Addition(sequences, primary_string=filtered)
+    result = dd.ddmin_add(deltas)
+    mlcs = "".join(MLCS_Addition.select(filtered, result))
+    ok = validate_mlcs(mlcs, sequences)
+    elapsed = time.time() - t0
+    return len(mlcs), mlcs, elapsed
+
+
+def load_sequences_from_file(path):
+    with open(path, "r", encoding="latin-1") as f:
         return [line.strip() for line in f if line.strip()]
 
-
-def dd_MLCS_addition(sequences: List[str]):
-    results = []
-    for i, s in enumerate(sequences):
-        print(f"\n[Run] Primary {i+1}/{len(sequences)} | len={len(s)}", flush=True)
-
-        deltas = beam_rank_deltas(s, sequences)
-        dd = MLCS_Addition(sequences, primary_string=s)
-        result = dd.ddmin_add(deltas)
-
-        mlcs = "".join(MLCS_Addition.select(s, result))
-        ok = validate_mlcs(mlcs, sequences)
-
-        print(f"[Run] Primary {i+1} done | MLCS len={len(mlcs)} | valid={ok}\n")
-        results.append((len(mlcs), mlcs))
-
-    best = max(results, key=lambda x: x[0])
-
-    print("\n===== Best MLCS Found =====")
-    print(f"Length: {best[0]}")
-    print(f"MLCS: {best[1][:100]}{'...' if len(best[1])>100 else ''}")
-    return best[1]
-
-"""
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to input sequence file")
-    parser.add_argument("--beam", type=int, default=2000,
-                        help="Beam width for beam-guided ordering (default=2000)")
-
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--beam", type=int, default=2000)
     args = parser.parse_args()
-
-    # overwrite config
     BEAM_W = args.beam
-
     sequences = load_sequences_from_file(args.input)
-    print(f" Loaded {len(sequences)} sequences.")
-    print(f" Lengths: {[len(s) for s in sequences]}")
-
+    print(f"Loaded {len(sequences)} sequences.")
+    print(f"Lengths: {[len(s) for s in sequences]}")
     start = time.time()
-    final_mlcs = dd_MLCS_addition(sequences)
-    end = time.time()
-
-    print(f"\n Final Total Runtime: {end - start:.4f} seconds")
-"""
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Path to input sequence file")
-    parser.add_argument("--beam", type=int, default=2000,
-                        help="Beam width for beam-guided ordering (default=2000)")
-    args = parser.parse_args()
-
-    
-    BEAM_W = args.beam
-
-    sequences = load_sequences_from_file(args.input)
-    print(f" Loaded {len(sequences)} sequences.")
-    print(f" Lengths: {[len(s) for s in sequences]}")
-
-    start = time.time()
-
-    # ============================================================
-    # *** ONLY RUN FOR PRIMARY SEQUENCE 1 ***
-    # ============================================================
-    primary = sequences[0]                      # primary string #1
-    print(f"\n[Run] Primary 1/1 | len={len(primary)}", flush=True)
-
-    deltas = beam_rank_deltas(primary, sequences)
-    dd = MLCS_Addition(sequences, primary_string=primary)
-    result = dd.ddmin_add(deltas)
-
-    mlcs = "".join(MLCS_Addition.select(primary, result))
-    ok = validate_mlcs(mlcs, sequences)
-
-    print(f"\n[Run] Primary 1 done | MLCS len={len(mlcs)} | valid={ok}")
-    print(f"MLCS: {mlcs[:120]}{'...' if len(mlcs)>120 else ''}")
-
-    end = time.time()
-    print(f"\n Final Total Runtime: {end - start:.4f} seconds")
+    length, mlcs, elapsed = run_single_primary(0, sequences, args.beam)
+    t_end = time.time()
+    print(f"\n===== Best MLCS Found =====")
+    print(f"Length: {length}")
+    print(f"MLCS: {mlcs[:120]}{'...' if len(mlcs) > 120 else ''}")
+    print(f"\nFinal Total Runtime: {t_end - start:.4f} seconds")
